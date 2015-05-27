@@ -1,0 +1,347 @@
+---
+title: "Bike sharing demand"
+output: pdf_document
+---
+#Introduction
+
+This document is created for the purpose of [Bike Sharing Demand](https://www.kaggle.com/c/bike-sharing-demand) competition on Kaggle. The point of the competition is to predict the demand on the rented bikes based on the historical data.
+
+
+
+```{r, echo=TRUE}
+train <- read.csv(file = "data/train.csv")
+test <- read.csv(file = "data/test.csv")
+```
+
+There were `r nrow(train)` training cases and `r nrow(test)` test cases in the data.
+
+#Data Quality Assesment
+
+The structure of the training set in R looks as follows:
+    
+```{r echo=TRUE}
+str(train)
+```
+
+  Comparing this structure to feature description provided by Kaggle:
+
+Data Fields  
+  
+datetime - hourly date + timestamp     
+season -  1 = spring, 2 = summer, 3 = fall, 4 = winter   
+holiday - whether the day is considered a holiday  
+workingday - whether the day is neither a weekend nor holiday  
+weather - 1: Clear, Few clouds, Partly cloudy, Partly cloudy   
+2: Mist + Cloudy, Mist + Broken clouds, Mist + Few clouds, Mist   
+3: Light Snow, Light Rain + Thunderstorm + Scattered clouds, Light Rain + Scattered clouds   
+4: Heavy Rain + Ice Pallets + Thunderstorm + Mist, Snow + Fog   
+temp - temperature in Celsius  
+atemp - "feels like" temperature in Celsius  
+humidity - relative humidity  
+windspeed - wind speed  
+casual - number of non-registered user rentals initiated  
+registered - number of registered user rentals initiated  
+count - number of total rentals  
+
+## Data representation fixes 
+  We can observe some problems with data representation in following variables:
+
+* datetime
+
+* season
+
+* holiday
+
+* workingday
+
+* weather
+
+Let's look at the data fields structure in more detail  
+
+---
+```{r echo=TRUE}
+summary(train)
+```
+  
+  Below the proposed approach for different incorrectly represented data fields:
+
+- **datetime** - variable is stored as Factor variable with 10886, so one level for every observations. We can solve this problem by extracting the time using some kind of string operations or using data handling packages. I will use R package *lubridate* for this purpose.
+
+- **season** - this is 4 level factor variable, represented as a integer. The type change will be required for analysis
+
+- **holiday** - this is binary variable, it might be interesting to connect this information with the day of the week extracted from datetime.
+
+- **workingday** - another binary variable, should contain same information as day of the week excluding the holiday
+
+- **weather** - factor variable with four levels represented as integer. Similar to the **season**. The commonsense would suggest that this variable is ordinal but results below does not support this assumption. While these results contradicting a little commonsense additional analysis should be performed.  
+
+```{r echo=TRUE}
+print ('Average number of bikes rented by weather')
+tapply(train$count,INDEX = train$weather,mean)
+```
+The average number of bikes rented for **weather** category "4" which corresponds to really bad weather is higher then for category "3" which corresponds to slightly better weather. It could suggest the problems with the data or that snow alone is not real problem for cyclist. It would be interesting idea to confirm if this weather variable can describe the situation when snow is just on the ground and not snowing.  
+
+##Correlation Analysis
+  The next step is to visualize correlation between variables to evaluate which of them could be removed before the model creation step is performed. The *corrplot* package is used for visualization, and the Pearson Correlation Coefficient was used for this case. Equation below:
+$$\rho_{XY} = \frac{E[(X - \mu_X)](Y-\mu_Y)}{\sigma_X\sigma_Y} $$
+  where:  
+  E is expectation  
+  $\sigma$ is standard deviation  
+  $\mu$ is mean  
+
+```{R echo=TRUE}
+library(corrplot)
+cor.train <- cor(train[,2:12])
+par(cex = 0.8)
+corrplot(cor.train, type = "upper",tl.srt=0,tl.cex = 0.65,tl.offset = 1,addCoef.col = "black")
+```
+The highest observed correlation is between **temp** and **atemp**. This lead us to conclusion that we should not include both variables in the model because they give the same information to the model. Additionally we can see that **casual** and **registered** variables are highly correlated to each other and to **count** but while these variables will not be used to model creation this is not particularly interesting.  
+The variables **atemp**,**temp** and **humidity** are strongly correlated to the **count** so they will be probably good predictors in the model.
+
+  The **season** variable is next on the list but while this is factor level variable and we store it as an integer some transformation must be done.
+```{r}
+train$is.spring <- 0
+train$is.spring[train$season == "1"] <- 1
+train$is.summer <- 0
+train$is.summer[train$season == "2"] <- 1
+train$is.fall <- 0
+train$is.fall[train$season == "3"] <- 1
+train$is.winter <- 0
+train$is.winter[train$season == "4"] <- 1
+#sum(ctrain[,13]+ctrain[,14]+ctrain[,15]+ctrain[,16])
+ctraincor <-cor(train[,12:16])
+corrplot(ctraincor, type = "upper",tl.srt=0,tl.cex = 0.65,tl.offset = 1,addCoef.col = "black")
+rm(ctraincor)
+```
+ From this figure we are interested only in first row because it contains information about correlation of number of bicycles rented with the season.
+
+##Cross-validation
+  For the purpose of the later model validation the sample of 10% of observations is excluded from the training set. This sample will be used later during model building exercise to compare how models behave on new data. We introduce it in case of overfitting of the model, and to provide first level of model verification. 
+  While this is not necessary for this case because we can use kaggle as a cross-validation engine or eventually use the source data to do model validation we keep this approach as a some sort of best practice. In the literature does not exist any particular fraction for sample, the proposed 10% is just proposed trade-off between the size of training data set and testing sample.
+  To ensure reproductibility of this exercise we use *seed* parameter.
+```{R echo=TRUE}
+set.seed(333)
+index <- 1:nrow(train)
+testindex <- sample(index,trunc(length(index)/10))
+trainset <- train[-testindex,]
+testset <- train[testindex,]
+```
+  The new train set contains `r nrow(trainset)` rows and test set `r nrow(testset)` observations.
+  
+#Model selection
+
+The first model I would like to present will be linear model based on least squares estimator. This model will be benchmark for further analysis.
+
+##Linear model
+  The least squares estimator is most commonly used estimator in statistical analysis. While the assumptions necessary for this estimator to be effective are in majority of the cases not meet it gives us good starting point for the further analysis.
+  The model form:
+    
+$$ Y = \beta_0 + \beta_1 X_{1} + ... + \beta_p X_{p} $$
+    where:  
+    Y - is column vector of outcomes  
+    X - is input matrix and $X_{n}$ is n-th column of this matrix  
+        
+  For the first linear model the features with reasonable correlation to the outcome will be selected. The next step will be including additional variables
+  
+###Data preparation
+  During correlation analysis we realized that **temp**,**atemp** and **humidity** are good features for the first model. The additional variable that could be useful is season. We would use split of the season variable used during correlation analysis.
+  
+###Estimation
+
+Below the results of the first model.
+$$Y = \beta_0 + \beta_1 X_{atemp}+ \beta_2 X_{humidity}+ \beta_3 X_{is.spring}+ \beta_4 X_{is.summer} + \beta_5 X_{is.fall} $$
+```{r}
+lm.model.1 <-lm(trainset$count~trainset$atemp+trainset$humidity+trainset$is.spring+trainset$is.summer+trainset$is.fall)
+summary(lm.model.1)
+```
+  This is very basic model that does not include time information coded in **datetime** variable. We achieved R-squared at the level 27% which is not satisfying for us. So next step will be include hour to the model. Using *lubridate* we extracted hour and weekday and use this information to plot average number of bikes by weekday and hour. The additional packages used for this exercise were *ggplot2* and *scales*
+```{R}
+library(ggplot2)
+library(scales)
+library(lubridate)
+train2 <- train
+train2$day <- wday(ymd_hms(train2$datetime), label=TRUE)
+train2$time <- as.POSIXct(strftime(ymd_hms(train2$datetime), format="%H:%M:%S"), format="%H:%M:%S")
+ggplot(train2, aes(x=time, y=count, color=day)) +
+  geom_smooth(fill = NA, size = 2) +
+  xlab("Time") +
+  ylab("Bikes Rented") +
+  scale_x_datetime(labels=date_format("%I:%M %p"))
+rm(train2)
+```
+
+  As we can see on above figure the number of Bikes rented is **not linearly** correlated to the time of the day. While we can keep using linear estimator it will be ineffective and we will drop this idea.
+
+###Results
+  The estimation of non-linear phenomena using linear estimator in this particular case most likely would be look like creating two different models. One for workdays and another for weekend+holidays because the structure of the bike rentals is different for these two cases. To achieve results we could use two another methods for each model. One would be creation of n-1 binary variables for every possible hour. From the point of view of statistics it would be calculation of conditional (on remaining variables) means for every possible hour. Second approach would be fitting Polynomial function (4rd grade for weekends and 6th grade for workday) and transforming the relation to linear.
+
+
+##Decision Trees
+
+The decision tree model is second model proposed to solve this case. This model will be used as a benchmark for further analysis. We calculate decision tree using two packages *rpart* and *tree*. The decision trees model is basic model which can be enhanced by many different techniques of sampling or creating group of the decision trees.These methods will be presented later.
+  
+###Data Preparation
+  The data preparation steep will be slightly easier for Random Forests because the input to the model can be in form of the factor variable.
+```{R echo= FALSE}
+extractFeatures <- function(data) {
+  features <- c("season",
+                "holiday",
+                "workingday",
+                "weather",
+                "temp",
+                "atemp",
+                "humidity",
+                "windspeed",
+                "hour",
+                "day",
+                "year")
+#  data$season <- as.factor(data$season)
+#  data$weather <- as.factor(data$weather)
+  data$hour <- hour(ymd_hms(data$datetime))
+  data$day <- wday(ymd_hms(data$datetime), label=TRUE)
+  data$year <- year(ymd_hms(data$datetime))
+  return(data[,features])
+}
+```
+In the opposite to linear model we will start with model with all possible data and then try to reduce number of features.
+
+###Estimation
+
+
+```{r}
+library(rpart)
+library(Metrics)
+dtmodel <- rpart(trainset$count~., data = extractFeatures(trainset))
+submissiondt1 <- data.frame(datetime=testset$datetime, count=NA)
+submissiondt1[, "count"] <- predict(dtmodel, extractFeatures(testset))
+rmsle(actual = testset$count,predicted = submissiondt1$count)
+```
+```{r}
+library(tree)
+dtmodel2 <- tree(trainset$count~., data = extractFeatures(trainset))
+submissiondt2 <- data.frame(datetime=testset$datetime, count=NA)
+submissiondt2[, "count"] <- predict(dtmodel2, extractFeatures(testset))
+rmsle(actual = testset$count,predicted = submissiondt2$count)
+```
+
+The both models give similar results.
+
+
+##Random Forest
+
+
+  The last challenger from the category of Decision Trees  will be [Random Forests](http://dx.doi.org/10.1023%2FA%3A1010933404324). Random forests are an ensemble learning method for classification or regression[ like in this particular scenario]. Random forests works by construction a wide range of decision trees at training time and outputting mean prediction of the individual trees. Random forests advantage for decision trees is to reduce habit of overfitting on training set.
+
+###Estimation
+
+  We train model based on all variables and plot relative importance for the model.
+```{r}
+library(randomForest)
+set1 <- extractFeatures(trainset)
+rfmodel <- randomForest(set1,trainset$count, ntree=100)
+summary(rfmodel)
+rf1imp <- importance(rfmodel)
+rf1fi <- data.frame(Feature=row.names(rf1imp), Importance=rf1imp[,1])
+ggplot(rf1fi, aes(x=reorder(Feature, Importance), y=Importance)) +
+    geom_bar(stat="identity", fill="#53cfff") + coord_flip() +ylab("")
+```
+  We can observe that **holiday** feature is not useful from the point of this model, additionally we would like to remove temp while it is strictly correlated to **atemp** and both variables contain same information. So we create second version of the model without these two variables.
+```{r echo =FALSE}
+submission0 <- data.frame(datetime=testset$datetime, count=NA)
+submission0[, "count"] <- predict(rfmodel, extractFeatures(testset))
+extractFeatures <- function(data) {
+  features <- c("season",
+                "workingday",
+                "weather",
+                "atemp",
+                "humidity",
+                "windspeed",
+                "hour",
+                "day",
+                "year")
+#  data$season <- as.factor(data$season)
+#  data$weather <- as.factor(data$weather)
+  data$hour <- hour(ymd_hms(data$datetime))
+  data$day <- wday(ymd_hms(data$datetime), label=TRUE)
+  data$year <- year(ymd_hms(data$datetime))
+  return(data[,features])
+}
+```
+```{r}
+set2 <- extractFeatures(trainset)
+rfmodel2 <- randomForest(set2,trainset$count, ntrees = 100)
+summary(rfmodel2)
+rf2imp <- importance(rfmodel2)
+rf2fi <- data.frame(Feature=row.names(rf2imp), Importance=rf2imp[,1])
+ggplot(rf2fi, aes(x=reorder(Feature, Importance), y=Importance)) +
+    geom_bar(stat="identity", fill="#53cfff") + coord_flip() +ylab("")
+```
+Now we can create submission to Kaggle.
+```{r}
+submission1 <- data.frame(datetime=testset$datetime, count=NA)
+submission1[, "count"] <- predict(rfmodel2, extractFeatures(testset))
+#write.csv(submission, file = "2_random_forest_submission.csv", row.names=FALSE)
+```
+
+##Alternative mode
+While the random forest generated on all data is interesting option. The model would be more useful from the point of described problem if the source data will be only from current month. Below the model which creates random forest for every month separately
+```{r}
+extractFeatures <- function(data) {
+  features <- c("season",
+                "workingday",
+                "weather",
+                "atemp",
+                "humidity",
+                "windspeed",
+                "hour",
+                "day")
+  data$hour <- hour(ymd_hms(data$datetime))
+  data$day <- wday(ymd_hms(data$datetime), label=TRUE)
+  return(data[,features])
+}
+trainFea <- extractFeatures(trainset)
+testFea  <- extractFeatures(testset)
+submission2 <- data.frame(datetime=testset$datetime, count=NA)
+for (i_year in unique(year(ymd_hms(testset$datetime)))) {
+  for (i_month in unique(month(ymd_hms(testset$datetime)))) {
+    testLocs   <- year(ymd_hms(testset$datetime))==i_year & month(ymd_hms(testset$datetime))==i_month
+    testSubset <- testset[testLocs,]
+    trainLocs  <- ymd_hms(trainset$datetime) <= min(ymd_hms(testSubset$datetime))
+    rf <- randomForest(extractFeatures(trainset[trainLocs,]), trainset[trainLocs,"count"], ntree=100)
+    submission2[testLocs, "count"] <- predict(rf, extractFeatures(testSubset))
+  }
+}
+```
+
+
+#Results
+  The two approaches were proposed. First one was based on linear estimator. But while the data structure suggested that independent variables does not explain the dependent variable in linear way the random forest models were proposed. From the two Random Forest models one was created based on the whole data set and second was set of different random forests models for each month separately. The difference between models were not significant so second approach sounds more reliable.
+  
+## Evaluation metrics
+The results are evaluated based on Root Mean Squared Logarithmic Error (RMSLE) which is calculated as follows
+
+$$\sqrt{\frac{1}{n}\sum\limits_{i=1}^n(log(p_i+1)-log(a_i+1))^2}$$
+where:
+
+- n is number of hours in the test set
+- $p_i$ is predicted count
+- $a_i$ is the actual count
+- log(x) is the natural logarithm
+
+To verify the accuracy of the model the implementation of this mechanism should be created in R. Fortunately this function is implemented in package *metrics*
+
+Model Name | RMSLE
+--------| --------
+Decision Tree 1 | `r rmsle(actual = testset$count,predicted = submissiondt1$count)`
+Decision Tree 2 | `r rmsle(actual = testset$count,predicted = submissiondt2$count)`
+Random Forests 1 | `r rmsle(actual = testset$count,predicted = submission0$count)`
+Random Forests 2 | `r rmsle(actual = testset$count,predicted = submission1$count)`
+Random Forests 3 | `r rmsle(actual = testset$count,predicted = submission2$count)`
+
+###Final
+
+From the point of the view of RMSLE Random Forest 2 looks like the best solution. Unfortunately it allowed me obtain position 1922 for around 3000 teams. Next steps to improve the performance of the model would be as follows:
+
+* try bagging and boosting
+* plot the test and training error to verify are we overfit or underfit
+* play with variables and script parameters.
